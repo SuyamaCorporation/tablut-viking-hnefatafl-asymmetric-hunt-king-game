@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>タブルート ヴァイキングボードゲーム</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #1a0f0a; font-family: 'Georgia', serif; }
+  .cell {
+    width: 52px; height: 52px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; border: 1px solid #5c3a1e; position: relative; font-size: 22px;
+    transition: background 0.15s;
+  }
+  @media(max-width:520px){ .cell { width:36px; height:36px; font-size:16px; } }
+  .cell-light { background: #c8a97a; }
+  .cell-dark  { background: #a07040; }
+  .cell-special { background: #6b3a1f; border: 2px solid #d4af37; }
+  .cell-selected { background: #d4af37 !important; }
+  .cell-valid { background: #4a7a40 !important; }
+  .cell-valid::after { content:'•'; color:#8f8; font-size:18px; }
+  .cell:hover { opacity: 0.85; }
+  .piece-attacker { font-size: 28px; }
+  .piece-defender { font-size: 28px; }
+  .piece-king { font-size: 30px; }
+  @media(max-width:520px){ .piece-attacker,.piece-defender,.piece-king{font-size:20px;} }
+  #board { border: 3px solid #d4af37; box-shadow: 0 0 30px #d4af3740; }
+  .log-entry { animation: fadeIn 0.3s ease; }
+  @keyframes fadeIn { from{opacity:0;transform:translateX(-10px)} to{opacity:1;transform:none} }
+  .rune-border { border: 2px solid #8b6914; border-radius: 8px; background: linear-gradient(135deg, #2a1a0a, #1a0f0a); }
+</style>
+</head>
+<body class="min-h-screen text-amber-100 p-4">
+<div class="max-w-4xl mx-auto">
+  <div class="text-center mb-6">
+    <h1 class="text-3xl font-bold text-amber-400">⚔️ タブルート</h1>
+    <p class="text-amber-600 text-sm">ヴァイキング非対称ボードゲーム — 王の逃脱 vs 包囲</p>
+  </div>
+
+  <div class="flex flex-wrap gap-4 justify-center items-start">
+    <!-- Board -->
+    <div>
+      <div id="board" class="inline-block"></div>
+    </div>
+
+    <!-- Side Panel -->
+    <div class="flex flex-col gap-3 min-w-[200px]">
+      <!-- Status -->
+      <div class="rune-border p-4">
+        <div id="turnIndicator" class="text-lg font-bold mb-2">⚔️ 攻撃側の番</div>
+        <div class="text-xs text-amber-500 mb-1">攻撃側 (⚔️): <span id="attackCount">16</span>枚</div>
+        <div class="text-xs text-amber-500 mb-1">守備側 (🛡️): <span id="defCount">8</span>枚</div>
+        <div class="text-xs text-amber-400">手数: <span id="moveCount">0</span></div>
+      </div>
+
+      <!-- Rules -->
+      <div class="rune-border p-3 text-xs text-amber-600">
+        <div class="font-bold text-amber-400 mb-1">📜 ルール</div>
+        <div>⚔️ 攻撃16 vs 🛡️守備8+👑王1</div>
+        <div>• ルークのように縦横移動</div>
+        <div>• 両側から挟んで捕獲</div>
+        <div>• 👑が四方を囲まれたら攻撃勝利</div>
+        <div>• 👑が角に到達したら守備勝利</div>
+        <div>• 攻撃側が先手</div>
+      </div>
+
+      <!-- Move Log -->
+      <div class="rune-border p-3">
+        <div class="font-bold text-amber-400 text-xs mb-2">📋 手順</div>
+        <div id="moveLog" class="text-xs text-amber-600 h-40 overflow-y-auto space-y-1"></div>
+      </div>
+
+      <button onclick="resetGame()" class="bg-red-900 hover:bg-red-800 text-amber-100 py-2 px-4 rounded text-sm border border-red-700 transition">
+        🔄 リセット
+      </button>
+    </div>
+  </div>
+
+  <!-- Win Banner -->
+  <div id="winBanner" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+    <div class="bg-amber-900 border-2 border-amber-400 rounded-2xl p-10 text-center shadow-2xl">
+      <div id="winText" class="text-4xl font-bold text-amber-300 mb-4"></div>
+      <div id="winDetail" class="text-amber-200 mb-6"></div>
+      <button onclick="resetGame()" class="bg-amber-600 hover:bg-amber-500 px-8 py-3 rounded-full font-bold text-white transition">
+        もう一度プレイ
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+const EMPTY=0, ATTACKER=1, DEFENDER=2, KING=3;
+const SIZE=9;
+// Special squares: corners + center
+const CORNERS = [[0,0],[0,8],[8,0],[8,8]];
+const CENTER = [4,4];
+
+function isCorner(r,c){ return CORNERS.some(([cr,cc])=>cr===r&&cc===c); }
+function isCenter(r,c){ return r===4&&c===4; }
+function isSpecial(r,c){ return isCorner(r,c)||isCenter(r,c); }
+
+let board, selected, currentTurn, moveCount, gameOver;
+
+function initBoard() {
+  board = Array.from({length:SIZE},()=>Array(SIZE).fill(EMPTY));
+  // Place king
+  board[4][4] = KING;
+  // Place defenders (8 around king in cross)
+  [[3,4],[5,4],[4,3],[4,5],[2,4],[6,4],[4,2],[4,6]].forEach(([r,c])=>board[r][c]=DEFENDER);
+  // Place attackers (16 on edges)
+  [[0,3],[0,4],[0,5],[1,4]].forEach(([r,c])=>board[r][c]=ATTACKER);
+  [[8,3],[8,4],[8,5],[7,4]].forEach(([r,c])=>board[r][c]=ATTACKER);
+  [[3,0],[4,0],[5,0],[4,1]].forEach(([r,c])=>board[r][c]=ATTACKER);
+  [[3,8],[4,8],[5,8],[4,7]].forEach(([r,c])=>board[r][c]=ATTACKER);
+  selected = null;
+  currentTurn = ATTACKER;
+  moveCount = 0;
+  gameOver = false;
+  renderBoard();
+  updateUI();
+  document.getElementById('winBanner').classList.add('hidden');
+  document.getElementById('moveLog').innerHTML = '';
+}
+
+function renderBoard() {
+  const boardEl = document.getElementById('board');
+  boardEl.innerHTML = '';
+  const validMoves = selected ? getValidMoves(selected[0], selected[1]) : [];
+  for (let r=0;r<SIZE;r++){
+    const row = document.createElement('div');
+    row.style.display='flex';
+    for (let c=0;c<SIZE;c++){
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      if (isSpecial(r,c)) cell.classList.add('cell-special');
+      else cell.classList.add((r+c)%2===0?'cell-light':'cell-dark');
+
+      if (selected && selected[0]===r && selected[1]===c) cell.classList.add('cell-selected');
+      else if (validMoves.some(([vr,vc])=>vr===r&&vc===c)) cell.classList.add('cell-valid');
+
+      const p = board[r][c];
+      if (p===ATTACKER) cell.textContent='⚔️';
+      else if (p===DEFENDER) cell.textContent='🛡️';
+      else if (p===KING) cell.textContent='👑';
+      else if (isCorner(r,c)) cell.textContent='🔱';
+
+      cell.dataset.r = r; cell.dataset.c = c;
+      cell.addEventListener('click', onCellClick);
+      row.appendChild(cell);
+    }
+    boardEl.appendChild(row);
+  }
+}
+
+function onCellClick(e) {
+  if (gameOver) return;
+  const r = parseInt(e.currentTarget.dataset.r);
+  const c = parseInt(e.currentTarget.dataset.c);
+  const piece = board[r][c];
+
+  if (selected) {
+    const validMoves = getValidMoves(selected[0], selected[1]);
+    const isValid = validMoves.some(([vr,vc])=>vr===r&&vc===c);
+    if (isValid) {
+      movePiece(selected[0], selected[1], r, c);
+      selected = null;
+      return;
+    }
+    // Select another piece of same side
+    if (canSelect(r,c,piece)) { selected=[r,c]; renderBoard(); return; }
+    selected = null;
+    renderBoard();
+    return;
+  }
+
+  if (canSelect(r,c,piece)) {
+    selected = [r,c];
+    renderBoard();
+  }
+}
+
+function canSelect(r,c,piece) {
+  if (piece===EMPTY) return false;
+  if (currentTurn===ATTACKER && piece===ATTACKER) return true;
+  if (currentTurn===DEFENDER && (piece===DEFENDER||piece===KING)) return true;
+  return false;
+}
+
+function getValidMoves(r,c) {
+  const moves = [];
+  const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+  for (const [dr,dc] of dirs) {
+    let nr=r+dr, nc=c+dc;
+    while (nr>=0&&nr<SIZE&&nc>=0&&nc<SIZE) {
+      if (board[nr][nc]!==EMPTY) break;
+      // Non-king pieces cannot enter corners or center
+      if (board[r][c]!==KING && isSpecial(nr,nc)) { nr+=dr; nc+=dc; continue; }
+      moves.push([nr,nc]);
+      nr+=dr; nc+=dc;
+    }
+  }
+  return moves;
+}
+
+function colName(c){ return String.fromCharCode(65+c); }
+
+function movePiece(fr,fc,tr,tc) {
+  const piece = board[fr][fc];
+  board[tr][tc] = piece;
+  board[fr][fc] = EMPTY;
+  moveCount++;
+
+  const side = currentTurn===ATTACKER?'攻撃':'守備';
+  const notation = side + ' ' + colName(fc)+(fr+1) + '→' + colName(tc)+(tr+1);
+
+  // Check captures
+  const captured = checkCaptures(tr,tc,piece);
+  let captureStr = '';
+  if (captured.length>0) captureStr = ' 捕獲:' + captured.length + '枚';
+
+  logMove(notation + captureStr);
+
+  // Check win conditions
+  if (piece===KING && isCorner(tr,tc)) { endGame('守備側の勝利！', '👑王が角に逃れた！'); return; }
+  if (isKingCaptured()) { endGame('攻撃側の勝利！', '👑王が包囲された！'); return; }
+  if (checkNoMoves()) { endGame(currentTurn===ATTACKER?'守備側の勝利！':'攻撃側の勝利！', '相手が動けなくなった！'); return; }
+
+  currentTurn = currentTurn===ATTACKER ? DEFENDER : ATTACKER;
+  updateUI();
+  renderBoard();
+}
+
+function checkCaptures(tr,tc,movingPiece) {
+  const captured = [];
+  const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+  const isEnemy = (p) => {
+    if (movingPiece===ATTACKER) return p===DEFENDER||p===KING;
+    return p===ATTACKER;
+  };
+  const isFriendly = (p) => {
+    if (movingPiece===ATTACKER) return p===ATTACKER;
+    return p===DEFENDER||p===KING;
+  };
+
+  for (const [dr,dc] of dirs) {
+    const ar=tr+dr, ac=tc+dc;
+    const br=tr+2*dr, bc=tc+2*dc;
+    if (ar<0||ar>=SIZE||ac<0||ac>=SIZE) continue;
+    const adj = board[ar][ac];
+    if (!isEnemy(adj)) continue;
+    if (adj===KING) continue; // King captured differently
+    if (br<0||br>=SIZE||bc<0||bc>=SIZE) continue;
+    const opp = board[br][bc];
+    if (isFriendly(opp)||isSpecial(br,bc)) {
+      board[ar][ac] = EMPTY;
+      captured.push([ar,ac]);
+    }
+  }
+  return captured;
+}
+
+function isKingCaptured() {
+  let kr=-1,kc=-1;
+  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++) if(board[r][c]===KING){kr=r;kc=c;}
+  if(kr<0) return true;
+  const dirs=[[-1,0],[1,0],[0,-1],[0,1]];
+  for(const [dr,dc] of dirs){
+    const nr=kr+dr, nc=kc+dc;
+    if(nr<0||nr>=SIZE||nc<0||nc>=SIZE) return false;
+    if(board[nr][nc]!==ATTACKER&&!isSpecial(nr,nc)) return false;
+  }
+  return true;
+}
+
+function checkNoMoves() {
+  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){
+    const p=board[r][c];
+    if(currentTurn===DEFENDER&&(p===DEFENDER||p===KING)||currentTurn===ATTACKER&&p===ATTACKER){
+      if(getValidMoves(r,c).length>0) return false;
+    }
+  }
+  return true;
+}
+
+function countPieces(type) {
+  let n=0;
+  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++) if(board[r][c]===type) n++;
+  return n;
+}
+
+function updateUI() {
+  document.getElementById('turnIndicator').textContent =
+    currentTurn===ATTACKER ? '⚔️ 攻撃側の番' : '🛡️ 守備側の番';
+  document.getElementById('attackCount').textContent = countPieces(ATTACKER);
+  document.getElementById('defCount').textContent = countPieces(DEFENDER);
+  document.getElementById('moveCount').textContent = moveCount;
+}
+
+function logMove(text) {
+  const log = document.getElementById('moveLog');
+  const div = document.createElement('div');
+  div.className = 'log-entry';
+  div.textContent = moveCount + '. ' + text;
+  log.prepend(div);
+}
+
+function endGame(title, detail) {
+  gameOver = true;
+  document.getElementById('winText').textContent = title;
+  document.getElementById('winDetail').textContent = detail;
+  document.getElementById('winBanner').classList.remove('hidden');
+}
+
+function resetGame() { initBoard(); }
+
+initBoard();
+</script>
+</body>
+</html>
